@@ -1,13 +1,9 @@
 use aya::{maps::RingBuf , programs::TracePoint};
+mod helpers;
 #[rustfmt::skip]
 use log::{debug, warn};
-use sentinel_common::ExecEvent;
 use tokio::{io::unix::AsyncFd, signal};
 
-fn cstr(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,6 +35,8 @@ async fn main() -> anyhow::Result<()> {
     let program: &mut TracePoint = ebpf.program_mut("sentinel").unwrap().try_into()?;
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
+    program.attach("syscalls",  "sys_enter_openat")?;
+    program.attach("syscalls",  "sys_enter_connect")?;
 
     tokio::spawn(async move {
         loop {
@@ -51,19 +49,17 @@ async fn main() -> anyhow::Result<()> {
             };
             let ring = guard.get_inner_mut();
             while let Some(item) = ring.next() {
-                if item.len() < core::mem::size_of::<ExecEvent>() {
+                if item.len() < core::mem::size_of::<u32>() {
                     continue;
                 }
-                // Bytes from the kernel may not be aligned, so read unaligned.
-                let ev: ExecEvent =
-                    unsafe { core::ptr::read_unaligned(item.as_ptr() as *const ExecEvent) };
-                println!(
-                    "exec pid={} uid={} comm={} file={}",
-                    ev.pid,
-                    ev.uid,
-                    cstr(&ev.comm),
-                    cstr(&ev.filename)
-                );
+                let kind = u32::from_ne_bytes([item[0], item[1], item[2], item[3]]);
+                println!("{kind}");
+                match kind{
+                    1 => helpers::execve_tracing(&item),
+                    2 => helpers::openat_tracing(&item),
+                    3 => helpers::connect_tracing(&item),
+                    _ => {}
+                }
             }
             guard.clear_ready();
         }
