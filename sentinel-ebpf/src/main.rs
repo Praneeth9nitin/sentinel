@@ -27,8 +27,8 @@ pub fn sentinel(ctx: TracePointContext) -> u32 {
 }
 
 fn run_all(ctx: TracePointContext) -> Result<(), i64> {
-    // try_execve(&ctx)?;
-    // try_openAt(&ctx)?;
+    try_execve(&ctx)?;
+    try_openAt(&ctx)?;
     try_connect(&ctx)?;
     Ok(())
 }
