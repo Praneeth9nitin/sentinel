@@ -7,31 +7,71 @@ use aya_ebpf::{
         bpf_probe_read_user_str_bytes, bpf_probe_read_user_buf
     },
     macros::{map, tracepoint},
-    maps::RingBuf,
+    maps::{RingBuf, HashMap},
     programs::TracePointContext,
 };
 use sentinel_common::{ExecEvent, OpenatEvent, ConnectEvent};
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+#[map]
+static TRACKED: HashMap<u32, u8> = HashMap::with_max_entries(4096, 0);
+
+#[inline(always)]
+fn is_tracked() -> bool {
+    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    unsafe { TRACKED.get(&tgid).is_some() }
+}
+
 pub const EVENT_EXEC: u32 = 1;
 pub const EVENT_OPENAT: u32 = 2;
 pub const EVENT_CONNECT: u32 = 3;
 
 #[tracepoint]
-pub fn sentinel(ctx: TracePointContext) -> u32 {
-    match run_all(ctx) {
-        Ok(_) => 0,
-        Err(_) => 1,
+pub fn sys_enter_execve(ctx: TracePointContext) -> u32 {
+    if is_tracked() {
+        let _ = try_execve(&ctx);
     }
+    0
 }
 
-fn run_all(ctx: TracePointContext) -> Result<(), i64> {
-    try_execve(&ctx)?;
-    try_openAt(&ctx)?;
-    try_connect(&ctx)?;
-    Ok(())
+#[tracepoint]
+pub fn sys_enter_openat(ctx: TracePointContext) -> u32 {
+    if is_tracked() {
+        let _ = try_openat(&ctx);
+    }
+    0
 }
+
+#[tracepoint]
+pub fn sys_enter_connect(ctx: TracePointContext) -> u32 {
+    if is_tracked() {
+        let _ = try_connect(&ctx);
+    }
+    0
+}
+
+#[tracepoint]
+pub fn sched_fork(ctx: TracePointContext) -> u32 {
+    if is_tracked() {
+        if let Ok(child) = unsafe { ctx.read_at::<u32>(44) } {
+            let _ = TRACKED.insert(&child, &1, 0);
+        }
+    }
+    0
+}
+
+#[tracepoint]
+pub fn sched_exit(_ctx: TracePointContext) -> u32 {
+    let id = bpf_get_current_pid_tgid();
+    let tgid = (id >> 32) as u32;
+    let tid = id as u32;
+    if tid == tgid {
+        let _ = TRACKED.remove(&tgid);
+    }
+    0
+}
+
 
 fn try_execve(ctx: &TracePointContext) -> Result<(), i64> {
     let filename_ptr = unsafe { ctx.read_at::<u64>(16)? } as *const u8;
@@ -51,8 +91,8 @@ fn try_execve(ctx: &TracePointContext) -> Result<(), i64> {
     Ok(())
 }
 
-fn try_openAt(ctx: &TracePointContext) -> Result<(), i64> {
-    let filename_ptr = unsafe { ctx.read_at::<u64>(16)? } as *const u8;
+fn try_openat(ctx: &TracePointContext) -> Result<(), i64> {
+    let filename_ptr = unsafe { ctx.read_at::<u64>(24)? } as *const u8;
     let dfd: i32 = unsafe { ctx.read_at(16)? };
     let flags: u32 = unsafe { ctx.read_at(32)? };
     let mode: u32 = unsafe { ctx.read_at(36)? };
