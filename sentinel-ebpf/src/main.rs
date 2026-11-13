@@ -11,6 +11,7 @@ use aya_ebpf::{
     programs::TracePointContext,
 };
 use sentinel_common::{ExecEvent, OpenatEvent, ConnectEvent};
+const MAX_PATH_LEN: usize = 64;
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
@@ -93,6 +94,11 @@ fn try_execve(ctx: &TracePointContext) -> Result<(), i64> {
 
 fn try_openat(ctx: &TracePointContext) -> Result<(), i64> {
     let filename_ptr = unsafe { ctx.read_at::<u64>(24)? } as *const u8;
+    let mut buf = [0u8; MAX_PATH_LEN];
+    let path_bytes = unsafe { bpf_probe_read_user_str_bytes(filename_ptr, &mut buf)? };
+    if is_ignored_path(path_bytes) {
+        return Ok(());
+    }
     let dfd: i32 = unsafe { ctx.read_at(16)? };
     let flags: u32 = unsafe { ctx.read_at(32)? };
     let mode: u32 = unsafe { ctx.read_at(36)? };
@@ -150,6 +156,14 @@ fn try_connect(ctx: &TracePointContext) -> Result<(), i64> {
         entry.submit(0);
     }
     Ok(())
+}
+
+#[inline(always)]
+fn is_ignored_path(path: &[u8]) -> bool {
+    path.starts_with(b"/lib")
+        || path.starts_with(b"/usr/lib")
+        || path.starts_with(b"/usr/share/locale")
+        || path.starts_with(b"/etc/ld.so.cache")
 }
 
 #[cfg(not(test))]

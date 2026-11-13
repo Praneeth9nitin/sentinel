@@ -1,4 +1,5 @@
 use aya::{programs::TracePoint,  maps::{HashMap as BpfHashMap, RingBuf}};
+use std::os::unix::ffi::OsStrExt;
 use std::{ffi::CString, os::fd::AsRawFd, time::Duration};
 use anyhow::Context;
 mod helpers;
@@ -55,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         .context("command contains a NUL byte")?;
     let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
     argv_ptrs.push(std::ptr::null());
+    let exe = resolve_command(&args.command[0])?;
 
     attach_tp(&mut ebpf, "sys_enter_execve", "syscalls", "sys_enter_execve")?;
     attach_tp(&mut ebpf, "sys_enter_openat", "syscalls", "sys_enter_openat")?;
@@ -70,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut buf = [0u8; 1];
                 libc::read(read_fd.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, 1);
                 libc::close(read_fd.as_raw_fd());
-                libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr());
+                libc::execv(exe.as_ptr(), argv_ptrs.as_ptr());
                 libc::_exit(127);
             }
         }
@@ -125,12 +127,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-
-    let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
-    println!("Exiting...");
-
     Ok(())
 }
 
@@ -142,4 +138,30 @@ fn attach_tp(ebpf: &mut aya::Ebpf, prog: &str, category: &str, name: &str) -> an
     p.load()?;
     p.attach(category, name)?;
     Ok(())
+}
+
+fn resolve_command(cmd: &str) -> anyhow::Result<CString> {
+    // Contains a slash (./agent, /usr/bin/python3): no search, use it as given.
+    if cmd.contains('/') {
+        return Ok(CString::new(cmd)?);
+    }
+
+    let path_var = std::env::var_os("PATH").context("PATH is not set")?;
+    for dir in std::env::split_paths(&path_var) {
+        // An empty PATH entry means "current directory" by old convention. Skip it.
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(cmd);
+        let c_path = CString::new(candidate.as_os_str().as_bytes())?;
+
+        let is_file = std::fs::metadata(&candidate).map(|m| m.is_file()).unwrap_or(false);
+        // access(X_OK) asks the kernel whether this user may execute it.
+        let can_exec = unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0;
+
+        if is_file && can_exec {
+            return Ok(c_path);
+        }
+    }
+    anyhow::bail!("command not found: {cmd}")
 }
