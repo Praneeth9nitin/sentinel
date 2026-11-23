@@ -5,7 +5,7 @@
 Built with Rust and eBPF ([Aya](https://aya-rs.dev)). Linux only. **Early version (v0.1): alert-only.**
 
 <!-- Put the 60-second demo recording (GIF or video) here. This is the most important line in the file. -->
-<video src="./assets/video.mov" controls width="100%"></video>
+<video src="./assets/video.mp4" controls width="100%"></video>
 ![demo](docs/demo.gif)
 
 ## Why
