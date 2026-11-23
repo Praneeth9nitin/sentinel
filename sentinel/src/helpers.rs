@@ -1,59 +1,50 @@
 use sentinel_common::{OpenatEvent, ExecEvent, ConnectEvent};
+use crate::policy::{Policy, Verdict};
+use std::net::{IpAddr, SocketAddr};
 
 fn cstr(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-pub fn openat_tracing(item: &[u8]){
+pub fn openat_tracing(item: &[u8], policy: &Policy) -> Option<(String, Verdict)>{
     if item.len() < core::mem::size_of::<OpenatEvent>() {
-        return;
+        return None;
     }
     let ev: OpenatEvent =
     unsafe { core::ptr::read_unaligned(item.as_ptr() as *const OpenatEvent) };
-    println!(
-        "openAt pid={} dfd={} flags={} mode={} file={}",
-        ev.pid,
-        ev.dfd,
-        ev.flags,
-        ev.mode,
-        cstr(&ev.filename)
-    );
-
+    let file = cstr(&ev.filename);
+    let line = format!("openAt pid={} flags={} file={}", ev.pid, ev.flags, file);
+    Some((line, policy.check_file(&file)))
 }
-pub fn execve_tracing(item: &[u8]){
+pub fn execve_tracing(item: &[u8], policy: &Policy)->Option<(String, Verdict)>{
     if item.len() < core::mem::size_of::<ExecEvent>() {
-        return;
+        return None;
     }
     let ev: ExecEvent =
     unsafe { core::ptr::read_unaligned(item.as_ptr() as *const ExecEvent) };
-    println!(
-        "exec pid={} uid={} com={} file={}",
-        ev.pid,
-        ev.uid,
-        cstr(&ev.comm),
-        cstr(&ev.filename)
-    );
+    let file = cstr(&ev.filename);
+    let line = format!("exec pid={} uid={} file={}", ev.pid, ev.uid, file);
+    Some((line, policy.check_program(&file)))
 }
 
-pub fn connect_tracing(item: &[u8]){
+pub fn connect_tracing(item: &[u8], policy: &Policy)->Option<(String, Verdict)>{
     if item.len() < core::mem::size_of::<ConnectEvent>() {
-        return;
+        return None;
     }
     let ev: ConnectEvent =
     unsafe { core::ptr::read_unaligned(item.as_ptr() as *const ConnectEvent) };
-    let mut addr = format!("{}.{}.{}.{}.{}",  ev.addr[0], ev.addr[1], ev.addr[2], ev.addr[3], u16::from_be(ev.port));
-    if ev.family == 10{
-        addr = std::net::Ipv6Addr::from(ev.addr).to_string();
-    }
-    println!(
-        "connect pid={} uid={} fd={} comm={} port={} address={} addresslen={}",
+    let port = u16::from_be(ev.port);
+    let ip = match ev.family {
+        2 => IpAddr::from([ev.addr[0], ev.addr[1], ev.addr[2], ev.addr[3]]),
+        10 => IpAddr::from(ev.addr),
+        _ => return None,
+    };
+    let line = format!(
+        "connect pid={} comm={} dst={}",
         ev.pid,
-        ev.uid,
-        ev.fd,
         cstr(&ev.comm),
-        ev.port,
-        addr,
-        ev.addrlen
+        SocketAddr::new(ip, port)
     );
+    Some((line, policy.check_connect(ip, port)))
 }

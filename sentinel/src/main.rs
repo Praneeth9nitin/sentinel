@@ -2,6 +2,9 @@ use aya::{programs::TracePoint,  maps::{HashMap as BpfHashMap, RingBuf}};
 use std::os::unix::ffi::OsStrExt;
 use std::{ffi::CString, os::fd::AsRawFd, time::Duration};
 use anyhow::Context;
+use std::fs::File;
+mod policy;
+use crate::policy::{Policy, Verdict};
 mod helpers;
 #[rustfmt::skip]
 use log::{debug};
@@ -15,6 +18,12 @@ use nix::{
 
 #[derive(Parser)]
 struct Sentinel {
+    #[arg(long)]
+    policy:String,
+
+    #[arg(long)]
+    verbose:bool,
+
     #[arg(last = true, required = true)]
     command: Vec<String>,
 }
@@ -46,8 +55,8 @@ async fn main() -> anyhow::Result<()> {
     let mut tracked: BpfHashMap<_, u32, u8> =
     BpfHashMap::try_from(ebpf.take_map("TRACKED").context("no TRACKED")?)?;
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").expect("EVENTS maps not found"))?;
-
     let args = Sentinel::parse();
+    let policy = policy::Policy::load(&args.policy)?;
     let argv: Vec<CString> = args
         .command
         .iter()
@@ -80,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
             drop(read_fd);
 
             tracked.insert(child.as_raw() as u32, 1, 0)?;
+            let verbose = args.verbose;
             let mut async_ring = AsyncFd::new(ring)?;
             tokio::spawn(async move {
                 loop {
@@ -96,19 +106,33 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                         let kind = u32::from_ne_bytes([item[0], item[1], item[2], item[3]]);
-                        match kind{
-                            1 => helpers::execve_tracing(&item),
-                            2 => helpers::openat_tracing(&item),
-                            3 => helpers::connect_tracing(&item),
-                            _ => {}
+                        let result = match kind{
+                            1 => helpers::execve_tracing(&item, &policy),
+                            2 => helpers::openat_tracing(&item, &policy),
+                            3 => helpers::connect_tracing(&item, &policy),
+                            _ => None
+                        };
+                        let mut seen = std::collections::HashSet::new();
+                        if let Some((line, verdict)) = result {
+                            match verdict {
+                                Verdict::Violation(why) => {
+                                    if seen.insert(why.clone()) {
+                                        println!("ALERT {why}   [{line}]");
+                                    }
+                                }
+                                Verdict::Allowed => {
+                                    if verbose {
+                                        println!("{line}");
+                                    }
+                                }
+                            }
                         }
                     }
                     guard.clear_ready();
                 }
             });
-
+            
             drop(write_fd);
-
             println!("Watching pid {} ({}). Ctrl-C to stop.", child, args.command.join(" "));
 
             let child_exit = tokio::task::spawn_blocking(move || waitpid(child, None));
